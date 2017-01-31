@@ -1,51 +1,94 @@
 package io.ess.services;
 
-import java.io.FileInputStream;
+import java.io.IOException;
 import java.io.InputStream;
+import java.util.concurrent.CountDownLatch;
 
 import org.apache.log4j.Logger;
+import org.quickfixj.jmx.JmxExporter;
 import org.springframework.stereotype.Service;
 
-import quickfix.Acceptor;
 import quickfix.Application;
+import quickfix.ConfigError;
 import quickfix.DefaultMessageFactory;
 import quickfix.DoNotSend;
 import quickfix.FieldNotFound;
-import quickfix.FileLogFactory;
 import quickfix.FileStoreFactory;
 import quickfix.IncorrectDataFormat;
 import quickfix.IncorrectTagValue;
+import quickfix.Initiator;
 import quickfix.LogFactory;
 import quickfix.Message;
 import quickfix.MessageFactory;
 import quickfix.MessageStoreFactory;
 import quickfix.RejectLogon;
+import quickfix.ScreenLogFactory;
+import quickfix.Session;
 import quickfix.SessionID;
 import quickfix.SessionSettings;
-import quickfix.SocketAcceptor;
+import quickfix.SocketInitiator;
 import quickfix.UnsupportedMessageType;
 
 @Service
 public class ClientApplicationService implements Application {
 	
 	private static Logger logger = Logger.getLogger(ClientApplicationService.class);
-
-	  public static void main(String args[]) throws Exception {
-		    // FooApplication is your class that implements the Application interface
-		    Application application = new ClientApplicationService();
-		    InputStream settingInputStream = ClientApplicationService.class.getResourceAsStream("/QuickFix4J.conf");
-		    logger.info(settingInputStream);
-		    SessionSettings settings = new SessionSettings(settingInputStream);
-		    MessageStoreFactory storeFactory = new FileStoreFactory(settings);
-		    LogFactory logFactory = new FileLogFactory(settings);
-		    MessageFactory messageFactory = new DefaultMessageFactory();
-		    Acceptor acceptor = new SocketAcceptor
-		      (application, storeFactory, settings, logFactory, messageFactory);
-		    acceptor.start();
-		    // while(condition == true) { do something; }
-		    acceptor.stop();
-		  }
 	
+	private static final CountDownLatch shutdownLatch = new CountDownLatch(1);
+
+	private static final Logger log = Logger.getLogger(ClientApplicationService.class);
+	private static ClientApplicationService banzai;
+	private boolean initiatorStarted = false;
+	private Initiator initiator = null;
+
+	public static void main(String[] args) throws Exception {
+		banzai = new ClientApplicationService();
+		banzai.init();
+		if (!System.getProperties().containsKey("openfix")) {
+			banzai.logon();
+		}
+		shutdownLatch.await();
+	}
+	
+	public void init() throws Exception {
+		InputStream inputStream = ClientApplicationService.class.getResourceAsStream("/QuickFix4J.conf");
+		SessionSettings settings = new SessionSettings(inputStream);
+		inputStream.close();
+		boolean logHeartbeats = Boolean.valueOf(System.getProperty("logHeartbeats", "true"));
+		ClientApplicationService application = new ClientApplicationService();
+		MessageStoreFactory messageStoreFactory = new FileStoreFactory(settings);
+		LogFactory logFactory = new ScreenLogFactory(true, true, true, logHeartbeats);
+		MessageFactory messageFactory = new DefaultMessageFactory();
+		initiator = new SocketInitiator(application, messageStoreFactory, settings, logFactory, messageFactory);
+		JmxExporter exporter = new JmxExporter();
+		exporter.register(initiator);
+	}
+	
+	public synchronized void logon() {
+		if (!initiatorStarted) {
+			try {
+				initiator.start();
+				initiatorStarted = true;
+			} catch (Exception e) {
+				log.error("Logon failed", e);
+			}
+		} else {
+			for (SessionID sessionId : initiator.getSessions()) {
+				Session.lookupSession(sessionId).logon();
+			}
+		}
+	}
+
+	public void logout() {
+		for (SessionID sessionId : initiator.getSessions()) {
+			Session.lookupSession(sessionId).logout("user requested");
+		}
+	}
+
+	public void stop() {
+		shutdownLatch.countDown();
+	}
+
 	/**
 	 * This callback notifies you when an administrative message is sent from a counterparty to 
 	 * your FIX engine. This can be usefull for doing extra validation on logon messages such as 
@@ -54,7 +97,7 @@ public class ClientApplicationService implements Application {
 	@Override
 	public void fromAdmin(Message message, SessionID sessionId)
 			throws FieldNotFound, IncorrectDataFormat, IncorrectTagValue, RejectLogon {
-		logger.info(String.format("Received message 1% for session 2%", message, sessionId));
+		logger.info(String.format("Received message %s for session %s", message, sessionId));
 	}
 
 	/**
@@ -72,7 +115,7 @@ public class ClientApplicationService implements Application {
 	@Override
 	public void fromApp(Message message, SessionID sessionId)
 			throws FieldNotFound, IncorrectDataFormat, IncorrectTagValue, UnsupportedMessageType {
-		logger.info(String.format("Received message 1% from app with session id 2%", message, sessionId));
+		logger.info(String.format("Received message %s from app with session id %s", message, sessionId));
 	}
 
 	/**
@@ -85,7 +128,7 @@ public class ClientApplicationService implements Application {
 	 */
 	@Override
 	public void onCreate(SessionID session) {
-		logger.info(String.format("Created session 1%", session));
+		logger.info(String.format("Created session %s", session));
 	}
 
 	/**
@@ -95,7 +138,7 @@ public class ClientApplicationService implements Application {
 	 */
 	@Override
 	public void onLogon(SessionID session) {
-		logger.info(String.format("Logged on 1%", session));
+		logger.info(String.format("Logged on %s", session));
 	}
 
 	/**
@@ -104,7 +147,7 @@ public class ClientApplicationService implements Application {
 	 */
 	@Override
 	public void onLogout(SessionID session) {
-		logger.info(String.format("Logged out 1%", session));
+		logger.info(String.format("Logged out %s", session));
 	}
 
 	/**
@@ -115,7 +158,7 @@ public class ClientApplicationService implements Application {
 	 */
 	@Override
 	public void toAdmin(Message message, SessionID session) {
-		logger.info(String.format("Message 1% send to admin using session id 2%", message, session));
+		logger.info(String.format("Message %s send to admin using session id %s", message, session));
 	}
 	
 	/**
@@ -130,7 +173,7 @@ public class ClientApplicationService implements Application {
 	 */
 	@Override
 	public void toApp(Message message, SessionID sessionId) throws DoNotSend {
-		logger.info(String.format("Message 1% sent to app from session id 2%", message, sessionId));
+		logger.info(String.format("Message %s sent to app from session id %s", message, sessionId));
 	}
 
 }
